@@ -238,3 +238,11 @@ mv ~/.dsh/browser-panel ~/.dsh/embedded-browser
 ```
 
 Alternatively, point `profileDir` at the old directory and keep it. Either way, a release that renames the plugin must say so in its release notes: the failure is silent, and the user only notices when a site asks them to log in again. `references/RELEASING.md` lists the rename's other obligations.
+
+## 18. The live tab competes for the same six connections as everything else
+
+**Symptom**: with the browser tab open, the rest of the DSH Web UI starts to feel slow or stops responding — a new window never finishes loading its session list, "new session" and "send" look dead — while the host itself is perfectly healthy: `curl` on the same origin answers in milliseconds, and the systemd journal shows nothing wrong. Closing one of the open GUI windows makes it recover.
+
+**Cause**: on HTTP/1.1 a browser allows roughly **six concurrent connections per origin, shared by every tab and window in that profile**. A connection that never ends sits on a slot for as long as it lives, and this plugin holds exactly one while its tab is visible: the `/api/dsh-embedded-browser/stream` WebSocket carrying the live picture. Other plugins hold one each for their own event streams, so the budget is spent before any ordinary `fetch` runs — and a request with no free connection *queues inside the browser*, which is why the server sees nothing at all and curl tells you the server is fine.
+
+**Fix**: treat a persistent connection as a budget line item, not as free. Keep at most one of them per tab (`tab.visible` gates this plugin's socket for exactly that reason — see #14, a hidden tab that holds a socket spends a slot on nobody's behalf), and stop the connection as soon as it has nothing to show. For the ordinary requests the plugin makes (the auto-open poll), stay unhurried: five seconds is plenty for "the AI just opened a browser", and it is one fewer request competing with the GUI's own traffic. When the GUI misbehaves while the server is fine, count the persistent connections of one origin before debugging anything else — a wrong count looks exactly like a broken backend.

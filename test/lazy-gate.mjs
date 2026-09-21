@@ -22,10 +22,24 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? '✓' : '✗'} ${name}${detail === '' ? '' : ` — ${detail}`}`)
 }
 
-/** A context stub recording every listener so tests can emit through it. */
+/**
+ * A context stub recording every listener so tests can emit through it.
+ *
+ * `inject` mirrors the real thing closely enough to test the property that
+ * matters: a dependency that is not there yet defers the callback instead of
+ * running it with `undefined`. `provide()` then releases every waiting callback
+ * — which is how the composition-order regression is reproduced.
+ */
 function makeContext({ sessions } = {}) {
   const listeners = new Map()
-  const disposed = []
+  const services = new Map()
+  if (sessions !== undefined) services.set('sessions', sessions)
+  const waiting = []
+  const run = (job) => {
+    const scoped = Object.create(ctx)
+    for (const name of job.deps) scoped[name] = services.get(name)
+    job.callback(scoped)
+  }
   const ctx = {
     on(name, handler) {
       const list = listeners.get(name) ?? []
@@ -37,17 +51,36 @@ function makeContext({ sessions } = {}) {
       }
     },
     get(name) {
-      return name === 'sessions' ? sessions : undefined
+      return services.get(name)
+    },
+    inject(deps, callback) {
+      const job = { deps, callback }
+      if (deps.every((name) => services.has(name))) run(job)
+      else waiting.push(job)
+      return () => {
+        const index = waiting.indexOf(job)
+        if (index >= 0) waiting.splice(index, 1)
+      }
     },
   }
   return {
     ctx,
-    disposed,
     emit(name, ...args) {
       for (const handler of [...(listeners.get(name) ?? [])]) handler(...args)
     },
     listenerCount(name) {
       return (listeners.get(name) ?? []).length
+    },
+    provide(name, value) {
+      services.set(name, value)
+      for (const job of [...waiting]) {
+        if (!job.deps.every((dep) => services.has(dep))) continue
+        waiting.splice(waiting.indexOf(job), 1)
+        run(job)
+      }
+    },
+    waitingCount() {
+      return waiting.length
     },
   }
 }
@@ -174,6 +207,22 @@ function arm({ sessions } = {}) {
   const gate = arm()
   gate.emit('session/created', sessionWithInvocation(SKILL_NAME))
   check('a session created after arming replays its own log', gate.opens() === 1)
+}
+
+{
+  // Composition order, not a reload: the session store mounts *after* the gate
+  // is armed. An apply-time `ctx.get` would find nothing and the replay would be
+  // lost — this is the bug the client half actually shipped with once.
+  const gate = arm({ sessions: undefined })
+  check('a missing session store defers the replay instead of losing it', gate.opens() === 0 && gate.waitingCount() === 1)
+  gate.provide('sessions', { list: () => [sessionWithInvocation(SKILL_NAME)] })
+  check('the deferred replay runs when the store appears', gate.opens() === 1)
+}
+
+{
+  const gate = arm({ sessions: undefined })
+  gate.provide('sessions', { list: () => [sessionWithInvocation(SKILL_NAME, { failed: true })] })
+  check('a deferred replay still ignores a failed invocation', gate.opens() === 0)
 }
 
 // ------------------------------------------------------------------- lifecycle
