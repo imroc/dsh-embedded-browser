@@ -1,14 +1,16 @@
-# Bundle patch for dsh-browser-panel: inserts the dual-face plugin row into the
+# Bundle patch for dsh-embedded-browser: inserts the dual-face plugin row into the
 # profile roster. The node half (exports ".") runs in the DSH host process
-# (browser lifecycle, /api/dsh-browser-panel routes, agent tools) and the
-# `dsh.client` declaration in package.json makes the browser half
-# (exports "./client") load in the Web GUI.
+# (browser lifecycle, /api/dsh-embedded-browser routes, the browser_embedded_*
+# tools) and the `dsh.client` declaration in package.json makes the browser half
+# (exports "./client") load in the Web GUI as an on-demand right-Sidebar tab.
 #
 # Override any field of the plugin config from your own patch layer, e.g.
-#   - id: browser-panel
+#   - id: embedded-browser
 #     config:
 #       mode: headless
 #       idleShutdownMinutes: 15
+#       lazyTools: false        # publish the tools at load instead of after
+#                               # the browser-use skill is invoked
 - insert:
-    - id: browser-panel
-      name: 'dsh-browser-panel'
+    - id: embedded-browser
+      name: 'dsh-embedded-browser'

@@ -1,7 +1,7 @@
 {
-  "name": "dsh-browser-panel",
-  "version": "0.2.0",
-  "description": "A browser that lives in the DSH host: every session gets its own tab, the AI drives it, and you watch or take over that same tab inside the DSH Web UI — logins, 2FA, QR codes and CAPTCHAs included.",
+  "name": "dsh-embedded-browser",
+  "version": "0.3.0",
+  "description": "A browser that lives inside the DSH host: every session gets its own tab, the AI drives it with lazily published browser_embedded_* tools, and a human watches or takes over that same tab in an on-demand right-Sidebar tab — no GUI, no external browser, logins/2FA/QR codes/CAPTCHAs included.",
   "license": "MIT",
   "type": "module",
   "main": "lib/index.js",
@@ -31,14 +31,16 @@
     }
   },
   "scripts": {
-    "test": "node test/smoke.mjs"
+    "test": "node test/lazy-gate.mjs && node test/smoke.mjs"
   },
   "keywords": [
     "deepseek-harness",
     "dsh",
     "dsh-plugin",
     "browser",
-    "remote-browser",
+    "embedded-browser",
+    "headless-browser",
+    "lazy-tools",
     "cdp",
     "chrome-devtools-protocol",
     "agent-tools",
@@ -47,10 +49,10 @@
   "author": "roc <i@roc.im>",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/imroc/dsh-browser-panel.git"
+    "url": "git+https://github.com/imroc/dsh-embedded-browser.git"
   },
-  "homepage": "https://github.com/imroc/dsh-browser-panel#readme",
+  "homepage": "https://github.com/imroc/dsh-embedded-browser#readme",
   "bugs": {
-    "url": "https://github.com/imroc/dsh-browser-panel/issues"
+    "url": "https://github.com/imroc/dsh-embedded-browser/issues"
   }
 }

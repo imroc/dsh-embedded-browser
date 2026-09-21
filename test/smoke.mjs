@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Standalone smoke test for the browser-panel core (per-session model).
+ * Standalone smoke test for the embedded-browser core (per-session model).
  *
  * Runs without DSH: it starts the real Chrome through BrowserManager, serves a
  * tiny login page, drives one tab per simulated session over CDP, then connects
@@ -18,7 +18,7 @@ import { ScreencastHub } from '../lib/screencast.js'
 import { HumanBroker } from '../lib/human.js'
 import { makeRoutes } from '../lib/routes.js'
 
-const PROFILE = '/tmp/dsh-browser-panel-smoke/profile'
+const PROFILE = '/tmp/dsh-embedded-browser-smoke/profile'
 const SESSION_A = 'session-a'
 const SESSION_B = 'session-b'
 const SESSION_C = 'session-c'
@@ -398,22 +398,22 @@ try {
     fetch(`${apiUrl}${path}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }).then((r) => r.json())
   const getJson = (path) => fetch(`${apiUrl}${path}`).then((r) => r.json())
 
-  const routeStateA = await getJson('/api/dsh-browser-panel/state?session=' + SESSION_A)
+  const routeStateA = await getJson('/api/dsh-embedded-browser/state?session=' + SESSION_A)
   check('GET /state?session= reports that session', routeStateA.session?.open === true && String(routeStateA.session.url).endsWith('/login'), `${routeStateA.session?.url} stream=${routeStateA.stream}`)
-  const routeStateAll = await getJson('/api/dsh-browser-panel/state')
+  const routeStateAll = await getJson('/api/dsh-embedded-browser/state')
   check('GET /state without a session is browser-level', routeStateAll.running === true && routeStateAll.sessionId === null, `sessions=${routeStateAll.sessions}`)
-  const list = await getJson('/api/dsh-browser-panel/sessions')
+  const list = await getJson('/api/dsh-embedded-browser/sessions')
   check(
     'GET /sessions lists every session tab',
     list.sessions.some((s) => s.id === SESSION_A) && list.sessions.some((s) => s.id === SESSION_B),
     list.sessions.map((s) => s.id).join(','),
   )
-  const opened = await postJson('/api/dsh-browser-panel/open', { sessionId: SESSION_D })
+  const opened = await postJson('/api/dsh-embedded-browser/open', { sessionId: SESSION_D })
   check('POST /open creates a tab for an idle session', opened.session?.open === true, opened.session?.url)
-  const closed = await postJson('/api/dsh-browser-panel/close', { sessionId: SESSION_D })
-  const afterClose = await getJson('/api/dsh-browser-panel/sessions')
+  const closed = await postJson('/api/dsh-embedded-browser/close', { sessionId: SESSION_D })
+  const afterClose = await getJson('/api/dsh-embedded-browser/sessions')
   check('POST /close removes exactly that tab', closed.ok === true && !afterClose.sessions.some((s) => s.id === SESSION_D))
-  const health = await getJson('/api/dsh-browser-panel/health')
+  const health = await getJson('/api/dsh-embedded-browser/health')
   check('GET /health reports the browser', health.ok === true && health.running === true, `sessions=${health.sessions}`)
 
   // ------------------------------------------------------------- teardown

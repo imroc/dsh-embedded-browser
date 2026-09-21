@@ -1,8 +1,10 @@
-# dsh-browser-panel
+# dsh-embedded-browser
 
 **English** | [简体中文](README.zh.md)
 
-A browser that lives inside the DSH host: every DSH session gets **its own tab** in it, the AI drives that tab with `browser_panel_*` tools, and you watch — or take over — the very same tab from a panel in the session page of the DSH Web UI.
+A browser that lives inside the DSH host: every DSH session gets **its own tab** in it, the AI drives that tab with `browser_embedded_*` tools, and you watch — or take over — the very same tab in a **right-sidebar tab that opens on demand** in the DSH Web UI.
+
+> **Renamed in 0.3.0.** Up to 0.2.0 this plugin was `dsh-browser-panel`: its tools were `browser_panel_*`, its routes lived under `/api/dsh-browser-panel/*`, and its profile under `$DSH_HOME/browser-panel/profile`. The package, the repository and every one of those names changed together, so the tool prefix now matches the package name. Point `profileDir` at the old directory if you want to keep the logins of an 0.2.0 install.
 
 It exists for one stubborn problem: agents run on machines with no display, but the sites they need are behind a login. A headless browser can be scripted; it cannot scan a QR code, type an SMS code, or solve a CAPTCHA. With this plugin the human does that part **inside the DSH Web UI**, on the same tab the AI is already working on, and the result stays in a persistent profile — so a login performed once works in every session, now and after a restart.
 
@@ -14,53 +16,68 @@ It exists for one stubborn problem: agents run on machines with no display, but 
 
 ## What it does
 
-**One browser, one tab per session, two control planes.** The AI speaks CDP on its own tab; the human speaks the panel on that same tab. The login the human performs is exactly the session the AI keeps using — and because all sessions share one profile, every other session is logged in too.
+**One browser, one tab per session, two control planes.** The AI speaks CDP on its own tab; the human sees and drives that same tab from the sidebar tab that mirrors it. The login the human performs is exactly the session the AI keeps using — and because all sessions share one profile, every other session is logged in too.
+
+### Tools (published lazily)
+
+The ten `browser_embedded_*` tools are **not registered when the plugin loads.** Their schemas are billed on every request, so by default they stay off the tool list until something proves the model is doing browser work:
+
+- a successful `skill` call naming `browser-use`;
+- the `/browser-use` gesture typed by a human;
+- a past successful invocation found in a session log — this third path is what reopens the gate after a plugin reload.
+
+So: **no skill, no tools.** Install the `browser-use` skill alongside this plugin (see [Install](#install)) — it is the routing skill that also covers the BrowserSkill channel, and calling it is what publishes these ten. Once open, the gate stays open for the whole host process and for **every** session, because `ctx.tools.register` writes into one host-wide registry. Set `lazyTools: false` to register the suite at load instead.
 
 | Capability | Tool | Notes |
 |---|---|---|
-| Report state | `browser_panel_status` | Running? Which URL/title has *this session's* tab? Is a human action pending? |
-| Open a URL | `browser_panel_navigate` | Starts the browser on first use; `newTab` replaces this session's page with a fresh tab |
-| Read the page | `browser_panel_snapshot` | Title, URL, numbered inventory of clickable/typable elements, visible text |
-| Click | `browser_panel_click` | By element number or by visible text; real input events |
-| Fill a field | `browser_panel_type` | React/Vue-friendly insertion; `submit` presses Enter |
-| Press a key | `browser_panel_press` | Enter, Tab, Escape, arrows, PageUp/Down, … |
-| Scroll | `browser_panel_scroll` | down/up/left/right/top/bottom |
-| Look at the page | `browser_panel_screenshot` | PNG returned to the model as an image attachment |
-| **Ask the human** | `browser_panel_ask_human` | Opens *this session's* panel with your instruction and **waits** until they press 我已完成 |
-| Close the tab | `browser_panel_close` | Closes this session's tab; the profile (and every login) stays |
+| Report state | `browser_embedded_status` | Running? Which URL/title has *this session's* tab? Is a human action pending? |
+| Open a URL | `browser_embedded_navigate` | Starts the browser on first use; `newTab` replaces this session's page with a fresh tab |
+| Read the page | `browser_embedded_snapshot` | Title, URL, numbered inventory of clickable/typable elements, visible text |
+| Click | `browser_embedded_click` | By element number or by visible text; real input events |
+| Fill a field | `browser_embedded_type` | React/Vue-friendly insertion; `submit` presses Enter |
+| Press a key | `browser_embedded_press` | Enter, Tab, Escape, arrows, PageUp/Down, … |
+| Scroll | `browser_embedded_scroll` | down/up/left/right/top/bottom |
+| Look at the page | `browser_embedded_screenshot` | PNG returned to the model as an image attachment |
+| **Ask the human** | `browser_embedded_ask_human` | Brings up *this session's* browser tab with your instruction and **waits** until they press 我已完成 |
+| Close the tab | `browser_embedded_close` | Closes this session's tab; the profile (and every login) stays |
 
-Panel side (DSH Web UI):
+Sidebar side (DSH Web UI):
 
-- a **浏览器 / Browser** tab in the session's view strip — the live view of *that* session's tab; every session shows its own;
-- the sidebar entry (browser glyph) is the host-wide **overview**: one row per session tab — title, URL, last used, a 待接管 / needs you badge while that session waits for a person, and 结束并清理 / Close tab on each row;
+- a **浏览器 / Browser** tab in the right sidebar holds the live view of *that* session's tab. It is **not** pinned to every session: it opens itself the moment the session gets a browser tab, so a conversation that never touches a browser shows no extra surface at all;
+- the right sidebar's **guide page** carries an 内嵌浏览器 / Embedded browser entry, which is how you open the tab by hand (before the AI has started a browser, or after you closed it);
+- the tab chip carries a small dot while the session it belongs to is waiting for a person — the only cross-session signal now that the host-wide overview is gone;
 - the canvas accepts your mouse, wheel, keyboard and IME input — it is not a screenshot viewer, the events are replayed into the very CDP session the AI uses;
-- the hand-over banner appears in the panel of **the session that asked**, with a 我已完成 / Done button that resumes the waiting tool call (and an optional note back to the AI);
-- a toolbar with back / forward / reload / repaint, Tab / ⇧Tab / Enter to walk a form without aiming the mouse, and 结束并清理 / Close tab.
+- the hand-over banner appears in the tab of **the session that asked**, with a 我已完成 / Done button that resumes the waiting tool call (and an optional note back to the AI);
+- a toolbar with back / forward / reload / repaint, Tab / ⇧Tab / Enter to walk a form without aiming the mouse, and 结束并清理 / Close tab;
+- closing the tab is obeyed: it does not come back by itself until the browser itself comes back — except for a *new* hand-over request, which would otherwise hang until it timed out.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-  AI["AI turn<br/>(browser_panel_* tools)"] -->|"CDP · this session's tab"| B["Chrome<br/>(persistent profile)"]
-  H["You, in the DSH Web UI"] -->|"mouse · keyboard · IME"| P["Session browser panel<br/>(client half)"]
-  P -->|"WebSocket /api/dsh-browser-panel/stream?session=…"| S["Host half<br/>(screencast + input replay)"]
-  S -->|"Page.startScreencast (watched tab)"| B
+  AI["AI turn<br/>(browser_embedded_* tools)"] -->|"CDP · this session's tab"| B["Chrome<br/>(persistent profile)"]
+  H["You, in the DSH Web UI"] -->|"mouse · keyboard · IME"| P["Right-sidebar tab<br/>(client half)"]
+  P -->|"WebSocket /api/dsh-embedded-browser/stream?session=…"| S["Host half<br/>(screencast + input replay)"]
+  P -->|"GET /api/dsh-embedded-browser/sessions (2 s poll)"| S
+  S -->|"Page.startScreencast (the visible tab)"| B
   S -->|"Page.captureScreenshot (~7 fps, the rest)"| B
-  S -->|"Input.dispatch* (that panel's tab)"| B
+  S -->|"Input.dispatch* (that tab)"| B
   B -->|"JPEG frames"| S --> P
-  B -.->|"one profile: cookies, localStorage"| D[("profile dir<br/>$DSH_HOME/browser-panel/profile")]
+  B -.->|"one profile: cookies, localStorage"| D[("profile dir<br/>$DSH_HOME/embedded-browser/profile")]
 ```
 
 - The host half launches one Chrome per DSH host process. With `mode: auto` it runs **headed on a private Xvfb** when Xvfb is available (better fingerprint than headless) and falls back to `--headless=new` otherwise.
-- A session's tab is created **lazily** — on that session's first `browser_panel_*` call, or when the human opens the browser from that session's panel — and closed when the session is disposed, when the AI calls `browser_panel_close`, or when the human presses 结束并清理 / Close tab. Sessions are isolated in *page state*, not in identity: they share the profile, so a login performed once is available everywhere.
+- A session's tab is created **lazily** — on that session's first `browser_embedded_*` call, or when the human presses the open button in that session's sidebar tab — and closed when the session is disposed, when the AI calls `browser_embedded_close`, or when the human presses 结束并清理 / Close tab. Sessions are isolated in *page state*, not in identity: they share the profile, so a login performed once is available everywhere.
 - Every tab is **activated once** when it is created. A Chrome target that was never activated silently discards every injected input event for the rest of its life, and one activation repairs it permanently. Afterwards a session's tab accepts input even while it is in the background — so the AI never moves your foreground.
-- Chrome only emits screencast frames for the **active tab**. The panel you are actually looking at sends `focus` and owns the real `Page.startScreencast`; every other attached session is served by polled `Page.captureScreenshot` frames (~7 fps target; its first frame can be cold — seconds — while another tab owns the screencast). A freshly opened panel always gets a seeded frame, because a static page emits none on its own.
+- Chrome only emits screencast frames for the **active tab**. The sidebar tab you are actually looking at sends `focus` and owns the real `Page.startScreencast`; every other attached session is served by polled `Page.captureScreenshot` frames (~7 fps target; its first frame can be cold — seconds — while another tab owns the screencast). A freshly opened panel always gets a seeded frame, because a static page emits none on its own.
+- The tab body is **mounted while its tab is invisible** too (a collapsed column, an inactive tab), so the component gates on visibility rather than on mount: a hidden tab holds no WebSocket and asks for no `focus`, and therefore never steals the browser's foreground from whoever is watching.
 - Tools carry no session parameter: every handler reads the session id from its own execution context (`exec.agent.id`), so tool names and parameters stay small and a session can never steer another session's tab. A call with no owning session is an error.
-- The panel is served by the host webserver, on the same origin and behind **the same session authentication as the Web UI itself** (`connection.requestRejection`). The routes that belong to a session carry its id — `GET /api/dsh-browser-panel/state?session=…`, `POST /open|/close` (session in the body), and the `/stream?session=…` WebSocket upgrade — while `GET /sessions` and `GET /health` describe the whole host, and `POST /human-done` settles a request by id. No extra port, no extra token, no tunnel.
-- Human take-over is per session: two sessions can wait on a human at the same time, and a request is delivered only to the panel of its own session.
+- The tools are published by the routing skill rather than by plugin load (see above); the plugin's own system-prompt section points the model at that skill, which is what keeps a gated suite discoverable.
+- The panel is served by the host webserver, on the same origin and behind **the same session authentication as the Web UI itself** (`connection.requestRejection`). The routes that belong to a session carry its id — `GET /api/dsh-embedded-browser/state?session=…`, `POST /open|/close` (session in the body), and the `/stream?session=…` WebSocket upgrade — while `GET /sessions` and `GET /health` describe the whole host, and `POST /human-done` settles a request by id. No extra port, no extra token, no tunnel.
+- Human take-over is per session: two sessions can wait on a human at the same time, and a request is delivered only to the sidebar tab of its own session.
 - Frames travel as JPEG over one WebSocket; input travels back as small JSON messages. Frames are dropped rather than queued when your connection falls behind.
 - Nothing is written into DSH core: the plugin is one composition row.
-- The measured constraints behind these choices are written down in [`references/PITFALLS.md`](references/PITFALLS.md) (#11–#13).
+- The measured constraints behind these choices are written down in [`references/PITFALLS.md`](references/PITFALLS.md) (#11–#13 for the browser, #14–#16 for the sidebar and the lazy gate).
 
 ## Requirements
 
@@ -70,17 +87,17 @@ flowchart LR
 
 ## Install
 
-Version **0.2.0**. This release is deliberately breaking: the plugin used to own one shared page for the whole host, and there is no shared-browser mode any more — 0.2.0 gives every session its own tab. 0.1.x is the previous, single-page release.
+Version **0.3.0**. This release renames the package, so it breaks every name an 0.2.0 install used: `dsh-browser-panel` → `dsh-embedded-browser`, `browser_panel_*` → `browser_embedded_*`, `/api/dsh-browser-panel/*` → `/api/dsh-embedded-browser/*`, `$DSH_HOME/browser-panel/profile` → `$DSH_HOME/embedded-browser/profile`. 0.2.0 is the last release under the old name; 0.2.0's own break (per-session tabs, no shared-page mode) still stands.
 
 ```sh
 # npm
-dsh plugin --profile web add dsh-browser-panel
+dsh plugin --profile web add dsh-embedded-browser
 
 # straight from GitHub
-dsh plugin --profile web add github:imroc/dsh-browser-panel
+dsh plugin --profile web add github:imroc/dsh-embedded-browser
 ```
 
-If your registry still resolves an 0.1.x build, ask for the version explicitly (`dsh-browser-panel@0.2.0`) or install straight from GitHub.
+A plugin has to end up in the profile **twice**: as a dependency (so its code is in the profile's own `node_modules`) and in `dsh.profile.bundles` (so the patch that inserts the plugin row is actually applied). `dsh plugin … add` does both, because the package declares `dsh.bundle`; a dependency added by hand alone mounts nothing.
 
 The package ships its built JavaScript, so nothing is compiled on install.
 
@@ -90,31 +107,40 @@ Restart the Web UI afterwards (adding a plugin row is a boot-time composition ch
 systemctl --user restart dsh-web      # or however you run `dsh web`
 ```
 
+### Recommended: the `browser-use` skill
+
+The ten tools are gated behind the `browser-use` skill, and that skill does **not** ship inside this package — it belongs to the skills your profile loads. Without it (or a `/browser-use` gesture) the gate never opens and no `browser_embedded_*` tool is ever published; the model will simply report that those tools do not exist:
+
+- install a global **`browser-use`** skill, or
+- set `lazyTools: false` to register the suite at load, and pay its schemas on every request.
+
+The skill name is compiled into `lib/lazy.js` (`SKILL_NAME`). If you rename the skill on your side, rename it there too.
+
 ## Verify
 
-1. Open the DSH Web UI. A **浏览器 / Browser** tab appears in the session's view strip — click it. The sidebar also gains a browser entry, which lists the tabs of every session.
-2. The tab reports that this session has no browser open yet, with a button to open one; the browser starts on demand (any `browser_panel_*` call opens it too), and the first frame is this session's own tab in the host Chrome.
-3. Type a URL in the AI conversation and ask it to open it; the page appears in that same tab:
+1. The tools are gated, so open the gate first: ask the AI to use the `browser-use` skill, or type `/browser-use` in the conversation. The ten `browser_embedded_*` tools are now published for **every** session in this host process.
+2. Ask for a page:
 
    ```
-   Use browser_panel_navigate to open https://example.com, then browser_panel_snapshot.
+   Use browser_embedded_navigate to open https://example.com, then browser_embedded_snapshot.
    ```
 
-4. Ask the AI to hand over, then complete the login yourself in the panel:
+3. The first browser call opens a **浏览器 / Browser** tab in the right sidebar by itself — that is this session's own tab in the host Chrome. Before there is any browser there is no tab; the sidebar's guide page (内嵌浏览器 / Embedded browser) is the manual way to open one first.
+4. Ask the AI to hand over, then complete the login yourself in that tab:
 
    ```
-   Call browser_panel_ask_human with the instruction "请在面板里完成登录，然后点我已完成".
+   Call browser_embedded_ask_human with the instruction "请在面板里完成登录，然后点我已完成".
    ```
 
-5. Log in, press **我已完成** — the tool call returns, and the AI continues with an authenticated session.
-6. In a second session, open its own browser tab: it is a *different* tab, but it is already logged in, because the profile is shared. Close one session's tab (`browser_panel_close`, or 结束并清理 / Close tab) and reopen it: still logged in.
+5. Log in, press **我已完成** — the tool call returns, and the AI continues with an authenticated session. Close the tab first if you like: the next hand-over request brings it back.
+6. In a second session, open its own browser tab: it is a *different* tab, but it is already logged in, because the profile is shared. Close one session's tab (`browser_embedded_close`, or 结束并清理 / Close tab) and reopen it: still logged in.
 
 ## Configuration
 
 Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the profile's `cordis.patch.yml`). The whole `config` key is replaced, so restate what you need:
 
 ```yaml
-- id: browser-panel
+- id: embedded-browser
   config:
     mode: headless            # auto | headed | headless
     viewport: 1280x800
@@ -124,11 +150,11 @@ Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the 
 | Key | Default | Meaning |
 |---|---|---|
 | `browserPath` | `''` | Explicit Chrome/Chromium path; empty = auto-detect. |
-| `profileDir` | `''` | Persistent profile; empty = `$DSH_HOME/browser-panel/profile`. Shared by every session. |
+| `profileDir` | `''` | Persistent profile; empty = `$DSH_HOME/embedded-browser/profile`. Shared by every session. |
 | `mode` | `auto` | `auto` = headed on a private Xvfb when available, else headless. |
 | `screen` | `1440x900x24` | Geometry of the private Xvfb. |
 | `windowSize` | `1440x900` | Chrome window size in headed mode. |
-| `viewport` | `1440x900` | Emulated page viewport — the same for every session tab, and the panel canvas coordinate space. |
+| `viewport` | `1440x900` | Emulated page viewport — the same for every session tab, and the sidebar canvas coordinate space. |
 | `xvfbDisplay` | `:99` | Preferred X display; the next free one is used if taken. |
 | `port` | `0` | Fixed DevTools port; `0` picks a free one. |
 | `startUrl` | `about:blank` | First URL of each session's fresh tab. |
@@ -138,9 +164,10 @@ Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the 
 | `screencastQuality` | `60` | JPEG quality of the stream (and of the polled stills). |
 | `screencastMaxWidth` | `1440` | Maximum streamed frame width. |
 | `pollFrameMs` | `140` | Poll interval for panels that cannot own the foreground screencast (~7 fps). Values below `60` are clamped. |
-| `askHumanTimeoutSeconds` | `600` | Default budget of `browser_panel_ask_human`. |
-| `idleShutdownMinutes` | `0` | Stop the browser — and with it every session's tab — after this much idle time; `0` never stops it. |
+| `askHumanTimeoutSeconds` | `600` | Default budget of `browser_embedded_ask_human`. |
+| `idleShutdownMinutes` | `10` | Stop the browser — and with it every session's tab — after this much idle time; `0` never stops it. Reaping is lossless: a tab reopens at its last URL, and the profile keeps every login. |
 | `autoStart` | `false` | Start the browser with the host instead of on first use. |
+| `lazyTools` | `true` | Publish the ten tools only after the `browser-use` skill is invoked; `false` registers the suite at load. |
 | `startTimeoutMs` | `20000` | How long to wait for the DevTools endpoint after launch. |
 
 ## Security notes
@@ -154,10 +181,10 @@ Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the 
 ## Rollback
 
 ```sh
-dsh plugin --profile web remove dsh-browser-panel   # or delete the row from cordis.patch.yml
+dsh plugin --profile web remove dsh-embedded-browser   # or delete the row from cordis.patch.yml
 ```
 
-Then restart the Web UI. The profile directory is left in place, so reinstalling keeps your logins. Delete `$DSH_HOME/browser-panel/profile` to forget them.
+Then restart the Web UI. The profile directory is left in place, so reinstalling keeps your logins. Delete `$DSH_HOME/embedded-browser/profile` to forget them.
 
 ## License
 

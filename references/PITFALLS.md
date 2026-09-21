@@ -1,6 +1,8 @@
 # Pitfalls hit while building this plugin
 
-Every entry is a real failure observed while developing `dsh-browser-panel` against DSH `0.1.5-rc.2`. They are written down because each one presents as something else entirely.
+Every entry is a real failure observed while developing this plugin against DSH `0.1.5-rc.2` and later. They are written down because each one presents as something else entirely.
+
+> **A note on names.** Until 0.2.0 this plugin was `dsh-browser-panel`, its tools were `browser_panel_*`, and its client half mounted as `dbp-*` under a `conversation.view` tab. Entries written before the 0.3.0 rename keep the names that were in force when the failure happened (they are marked 更名前 / "before the rename" where the old name is load-bearing); the current names are in the README.
 
 ## 1. Plugin metadata on the wrong export
 
@@ -105,7 +107,7 @@ ctx.slots.inject('main', () => ctx.slots.register({ name: 'main', key: id }, Pan
 
 ```js
 // style — the overlay must never intercept the pointer
-.dbp-overlay { … ; pointer-events: none }
+.dbp-overlay { … ; pointer-events: none }      // 更名前: the class prefix is `deb-` since 0.3.0
 
 // component — a ref does not re-render, so the overlay never unmounted
 const [hasFrame, setHasFrame] = useState(false)
@@ -159,3 +161,80 @@ Two mapping bugs shipped in the same fix: pointer coordinates now map through th
 - Polling one tab does **not** slow the screencast of another down; the reverse — a live screencast on one tab stalling captures on another — is what the numbers above show.
 
 Also measured: hidden tabs throttle `setInterval` to roughly 0.6–1 tick/s versus ~3.3 on the active tab, so anything on a shared page that depends on fast timers behaves differently once it is not the visible tab.
+
+## 14. "Mounted" is not "on screen": a hidden sidebar tab kept the stream alive
+
+**Symptom**: with the browser tab *open but not on screen* — the sidebar column collapsed, or the human reading a different tab in the same pane — the plugin still behaved as if somebody were watching: the session's tab stayed activated, it kept the full-rate `Page.startScreencast`, and a human watching a *different* session's tab was pushed onto the polled path (~7 fps) for no reason. Bandwidth was being spent on a picture nobody could see.
+
+**Cause**: a docked sidebar body is **not unmounted** when its tab goes inactive or the column collapses — React keeps it mounted so switching back is instant, and only `props.useTabInfo().tab.visible` flips to `false`. The first version of the component opened its WebSocket and sent `focus` from a mount effect, because that was the contract of the *old* surface: under the per-session `conversation.view` tab (更名前), mounting **was** selection — the component only existed while its tab was the visible one. After the move to the right sidebar, "mounted" silently came to mean "every session that ever opened the tab", and the focus protocol quietly inverted.
+
+**Fix**: drive the stream from visibility, and pass it in from the seat rather than trusting the component's own mount:
+
+```js
+// the seat: the slot gives the body its tab's live visibility
+ctx.slots.register({ name: 'sidebar.right.pane.tab', key: TAB_ID }, function Body(props) {
+  const info = props.useTabInfo?.()
+  return h(SessionPanel, { ...props, dict, visible: info?.tab?.visible !== false })
+})
+
+// the component: no socket, no focus request, when nobody can see it
+if (sessionId === '' || open !== true || visible !== true) { setConnection('idle'); return undefined }
+```
+
+**Consequence beyond this plugin**: any surface the host can hide without unmounting (docked panes, collapsible columns, background tabs) has this trap, and it fails in the *polite* direction — nothing errors, something else just gets slower. The rule is written down as an invariant ("visibility, not mount, is the focus protocol"), and the same reasoning applies to any "open on mount" side effect.
+
+## 15. A sidebar tab type is two halves — and registering it is not opening it
+
+**Symptom**: the chip renders, the guide-page entry is clickable, and clicking it *does* open a pane — which then shows the owner's generic "nothing can view this" notice. No exception in the browser console, no line in the host log, no obvious broken name. It reads like a rendering bug rather than a registration mistake.
+
+**Cause**: two separate registrations have to agree, under one string:
+
+1. `ctx.sidebarRightTabs.register({ id: TAB_ID, kind: TAB_KIND, title, guide })` — the static definition of a page **type**: its title, its icon, its guide entry, and the `kind` that `openTabIn` names.
+2. the **keyed seats** that draw it: `sidebar.right.pane.tab` (the body) and `sidebar.right.pane.tab.title` (the chip), both registered with `key: TAB_ID`.
+
+The body is looked up by the type's id, so a mismatch — e.g. the type registered as `dsh-embedded-browser/panel` while the seat registers under `embedded-browser/panel` — produces a type whose body nobody registered and a body nothing can address. The host renders its placeholder rather than complaining, which is exactly why this is expensive to find: every individual name looks plausible.
+
+**Fix**: one constant, two uses (here `TAB_ID`), and a separate constant for the kind that `openTabIn` takes; register both halves or neither. The client half also feature-checks every service, because on an older or headless client the seats simply do not exist and a browser-only plugin must not take the workbench down with it.
+
+**And the second half of the sentence**: declaring a type opens **nothing**. The tab appears only when something calls `ctx.sidebarRight.openTabIn(sessionId, kind, { revealIfOpened: true })` — note **`kind`**, not `id`. That separation is the feature (a type can exist for a whole deployment while no session shows it), but it means "I registered the tab" and "the tab is visible" are two different bugs to look for.
+
+## 16. A plugin reload closes an event-only lazy gate forever
+
+**Symptom**: the lazily published tools (`browser_embedded_*`) are simply missing for the rest of the host process, even though the model successfully invoked the gating `browser-use` skill a minute earlier in the same, still-live session. Asking the model to invoke the skill again "fixes" it, which makes it look like a flaky model rather than a broken gate.
+
+**Cause**: the gate was opened by *listening for future events* — `tools/result` for a successful `skill` call, plus `session/event` for the `/browser-use` gesture. A plugin reload (or any re-arm of the same composition) installs fresh listeners, and the invocation that opened the previous gate is in the **past**: a past event never fires again, so nothing ever opens the new gate. Every session in the process stays gated, and only an explicit new invocation can lift it.
+
+**Fix**: an event listener is not enough — arm time must also **replay** what already happened:
+
+```js
+// the gate is host-wide, so its listeners are registered { global: true }: an
+// agent-scoped listener only ever sees its own sessions, and the reveal must not
+// depend on which agent happened to invoke the skill.
+const global = { global: true }
+
+// replay every live session's log when the gate is armed…
+const sessions = ctx.get('sessions')
+if (sessions !== undefined && typeof sessions.list === 'function') for (const session of sessions.list()) scan(session)
+// …and keep replaying for sessions created later
+ctx.on('session/created', (session) => scan(session), global)
+```
+
+with `scan` reading the durable log, not a cache. A matching `tool/result` whose `isError !== true` is what proves the skill call succeeded when replaying — a `tool/call` alone is not proof, because the model may have named a skill that does not exist or the call may have failed. A `skill-invocation` message (the `/browser-use` gesture) needs no pairing.
+
+**Same trap, upstream**: Tencent/BrowserSkill issue #269 is this exact failure, and the reference implementation disabled its lazy exposure after hitting it. The lesson generalises to any gate keyed on "this happened once": **if arming it does not consult history, a reload turns it into a one-way door.**
+
+
+## 17. Renaming the plugin silently throws away the logins
+
+**Symptom**: after the 0.3.0 rename the browser starts fine but every site asks for a login again. Nothing errored, no file was deleted, and the old profile directory is still sitting on disk with its `Cookies` and `Login Data` in place.
+
+**Cause**: the profile directory is **derived from the plugin's own name** (`join(DSH_HOME, 'embedded-browser', 'profile')`), so a rename moves the default. The new directory is simply empty, and Chrome happily creates a fresh profile in it — the old one is never read again. On a host that had been running for a while this is the same as wiping every session, including the SSO cookies the whole point of this plugin is to reuse.
+
+**Fix**: a rename is not only strings in code — it moves a **data directory** too, and the migration has to happen before the first start of the renamed plugin:
+
+```sh
+# no Chrome may be running on it; confirm with `ps` first
+mv ~/.dsh/browser-panel ~/.dsh/embedded-browser
+```
+
+Alternatively, point `profileDir` at the old directory and keep it. Either way, a release that renames the plugin must say so in its release notes: the failure is silent, and the user only notices when a site asks them to log in again. `references/RELEASING.md` lists the rename's other obligations.

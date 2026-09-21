@@ -8,7 +8,7 @@
  *   2. node test/human-input.mjs <guiDevToolsPort> <sharedBrowserDevToolsPort>
  *
  * Both ports speak CDP: the first is the browser showing the GUI, the second is
- * the browser the plugin runs (its port is in /api/dsh-browser-panel/state).
+ * the browser the plugin runs (its port is in /api/dsh-embedded-browser/state).
  */
 import { Cdp } from '../lib/cdp.js'
 
@@ -54,7 +54,7 @@ const field = JSON.parse(
 // 2) The panel canvas maps the emulated viewport onto its own box.
 const canvas = JSON.parse(
   await gui.page.evaluate(
-    `(() => { const c = document.querySelector('[data-dsh-browser-panel] canvas'); const r = c.getBoundingClientRect();
+    `(() => { const c = document.querySelector('[data-dsh-embedded-browser] canvas'); const r = c.getBoundingClientRect();
       return JSON.stringify({ left: r.left, top: r.top, width: r.width, height: r.height, cw: c.width, ch: c.height }) })()`,
   ),
 )
