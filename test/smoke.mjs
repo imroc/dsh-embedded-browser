@@ -23,6 +23,24 @@ const SESSION_A = 'session-a'
 const SESSION_B = 'session-b'
 const SESSION_C = 'session-c'
 const SESSION_D = 'session-d'
+/**
+ * How long a live-stream assertion may take.
+ *
+ * Chrome sometimes stops emitting screencast frames (a lost acknowledgement, or a
+ * tab that is no longer the active one — see references/PITFALLS.md #13), and the
+ * hub **self-heals** that on its state timer: `checkStreamHealth` restarts the
+ * stream after `STALL_MS` (8s), checked every 2.5s. A stalled stream is therefore
+ * an expected state with a documented recovery time, and an assertion with a
+ * budget *shorter* than that recovery is testing the weather, not the product:
+ * it passed whenever no stall happened and failed whenever one did (measured on
+ * this machine: ~40% either way, before and after the 0.3.0 refactor — the
+ * failure was never a regression, only a budget below the contract).
+ *
+ * So wait past the recovery window, and keep the diagnostic detail on failure so
+ * a future red run says whether frames were late, dropped, or never produced.
+ */
+const STREAM_BUDGET_MS = 15_000
+
 const results = []
 let failures = 0
 
@@ -293,14 +311,14 @@ try {
   const framesBeforeNav = panelA.frames.length
   await manager.navigate(SESSION_A, `${siteUrl}/login`)
   let navWait = 0
-  while (panelA.frames.length <= framesBeforeNav && navWait < 6000) {
+  while (panelA.frames.length <= framesBeforeNav && navWait < STREAM_BUDGET_MS) {
     await sleep(200)
     navWait += 200
   }
   check(
     'live screencast pushes frames on page change',
     panelA.frames.length > framesBeforeNav,
-    `${framesBeforeNav} -> ${panelA.frames.length} frames (waited ${navWait}ms, watched=${hub.watched}, stream=${hub.stream?.sessionId})`,
+    `${framesBeforeNav} -> ${panelA.frames.length} frames (waited ${navWait}ms, watched=${hub.watched}, stream=${hub.stream?.sessionId}, dropped=${hub.framesDropped}, conns=${hub.connectionsFor(SESSION_A).length}, activeTarget=${manager.watchedSessionId ?? 'none'})`,
   )
 
   // Reconnect race: a disconnecting panel used to kill the *next* panel's stream.
@@ -311,14 +329,14 @@ try {
   const framesBeforeReconnectNav = reconnected.frames.length
   await manager.navigate(SESSION_A, `${siteUrl}/login`)
   let reconnectWait = 0
-  while (reconnected.frames.length <= framesBeforeReconnectNav && reconnectWait < 6000) {
+  while (reconnected.frames.length <= framesBeforeReconnectNav && reconnectWait < STREAM_BUDGET_MS) {
     await sleep(200)
     reconnectWait += 200
   }
   check(
     'stream survives a panel reconnect race',
     reconnected.frames.length > framesBeforeReconnectNav,
-    `${framesBeforeReconnectNav} -> ${reconnected.frames.length} frames (waited ${reconnectWait}ms)`,
+    `${framesBeforeReconnectNav} -> ${reconnected.frames.length} frames (waited ${reconnectWait}ms, dropped=${hub.framesDropped}, stream=${hub.stream?.sessionId})`,
   )
 
   // ------------------------------------------------- never-activated regression
