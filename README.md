@@ -20,13 +20,13 @@ It exists for one stubborn problem: agents run on machines with no display, but 
 
 ### Tools (published lazily)
 
-The ten `browser_embedded_*` tools are **not registered when the plugin loads.** Their schemas are billed on every request, so by default they stay off the tool list until something proves the model is doing browser work:
+The twelve `browser_embedded_*` tools are **not registered when the plugin loads.** Their schemas are billed on every request, so by default they stay off the tool list until something proves the model is doing browser work:
 
 - a successful `skill` call naming `browser-use`;
 - the `/browser-use` gesture typed by a human;
 - a past successful invocation found in a session log — this third path is what reopens the gate after a plugin reload.
 
-So: **no skill, no tools.** Install the `browser-use` skill alongside this plugin (see [Install](#install)) — it is the routing skill that also covers the BrowserSkill channel, and calling it is what publishes these ten. Once open, the gate stays open for the whole host process and for **every** session, because `ctx.tools.register` writes into one host-wide registry. Set `lazyTools: false` to register the suite at load instead.
+So: **no skill, no tools.** Install the `browser-use` skill alongside this plugin (see [Install](#install)) — it is the routing skill that also covers the BrowserSkill channel, and calling it is what publishes these twelve. Once open, the gate stays open for the rest of the host process and for **every** session — including sessions created later — because `ctx.tools.register` writes into one host-wide registry. A session that never read the skill seeing the tools is therefore normal, not a plugin that failed to mount. Restarting `dsh-web` starts a fresh process — and a closed gate: the tools are gone again until some session invokes the skill, because the reload replay only sees sessions that are live at that moment (see `references/PITFALLS.md` #24). Set `lazyTools: false` to register the suite at load instead.
 
 | Capability | Tool | Notes |
 |---|---|---|
@@ -37,9 +37,21 @@ So: **no skill, no tools.** Install the `browser-use` skill alongside this plugi
 | Fill a field | `browser_embedded_type` | React/Vue-friendly insertion; `submit` presses Enter |
 | Press a key | `browser_embedded_press` | Enter, Tab, Escape, arrows, PageUp/Down, … |
 | Scroll | `browser_embedded_scroll` | down/up/left/right/top/bottom |
+| **Change the environment** | `browser_embedded_emulate` | Device preset (7 of them, `iphone-14` …), explicit viewport (`width`+`height`), or light/dark (`theme`); `reset: true` restores the default |
+| **Evaluate in the page** | `browser_embedded_eval` | Runs JavaScript in this session's page and returns a bounded JSON projection (switch a theme attribute, read computed styles, assert on state) |
 | Look at the page | `browser_embedded_screenshot` | PNG returned to the model as an image attachment |
 | **Ask the human** | `browser_embedded_ask_human` | Brings up *this session's* browser tab with your instruction and **waits** until they press 我已完成 |
 | Close the tab | `browser_embedded_close` | Closes this session's tab; the profile (and every login) stays |
+
+`browser_embedded_emulate` is **per tab** and temporary: it changes no configuration, needs no restart, and cannot touch another session. `reset: true` returns the tab to the `viewport` the config pins. The preset names, dimensions, DPR and user agents are mirrored field for field from the BrowserSkill channel's `bsk emulate --device`, so "the same device" means the same page on either channel. Checking what a page looks like on a phone, and in the dark, is these two calls:
+
+```
+browser_embedded_emulate  { "device": "iphone-14" }   →  browser_embedded_screenshot
+browser_embedded_emulate  { "theme": "dark" }         →  browser_embedded_screenshot
+browser_embedded_emulate  { "reset": true }
+```
+
+One difference worth knowing: `device` is **device fidelity, not "a narrow window"**. A page that declares no `<meta name="viewport" content="width=device-width, initial-scale=1">` gets the default mobile viewport of **980 CSS pixels** and is zoomed out — exactly as a real phone would render it. To pin a layout width instead, pass `width`/`height` without `mobile`, which always takes effect.
 
 Sidebar side (DSH Web UI):
 
@@ -109,7 +121,7 @@ systemctl --user restart dsh-web      # or however you run `dsh web`
 
 ### Recommended: the `browser-use` skill
 
-The ten tools are gated behind the `browser-use` skill, and that skill does **not** ship inside this package — it belongs to the skills your profile loads. Without it (or a `/browser-use` gesture) the gate never opens and no `browser_embedded_*` tool is ever published; the model will simply report that those tools do not exist:
+The twelve tools are gated behind the `browser-use` skill, and that skill does **not** ship inside this package — it belongs to the skills your profile loads. Without it (or a `/browser-use` gesture) the gate never opens and no `browser_embedded_*` tool is ever published; the model will simply report that those tools do not exist:
 
 - install a global **`browser-use`** skill, or
 - set `lazyTools: false` to register the suite at load, and pay its schemas on every request.
@@ -118,7 +130,7 @@ The skill name is compiled into `lib/lazy.js` (`SKILL_NAME`). If you rename the 
 
 ## Verify
 
-1. The tools are gated, so open the gate first: ask the AI to use the `browser-use` skill, or type `/browser-use` in the conversation. The ten `browser_embedded_*` tools are now published for **every** session in this host process.
+1. The tools are gated, so open the gate first: ask the AI to use the `browser-use` skill, or type `/browser-use` in the conversation. The twelve `browser_embedded_*` tools are now published for **every** session in this host process, including sessions created later.
 2. Ask for a page:
 
    ```
@@ -154,7 +166,7 @@ Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the 
 | `mode` | `auto` | `auto` = headed on a private Xvfb when available, else headless. |
 | `screen` | `1440x900x24` | Geometry of the private Xvfb. |
 | `windowSize` | `1440x900` | Chrome window size in headed mode. |
-| `viewport` | `1440x900` | Emulated page viewport — the same for every session tab, and the sidebar canvas coordinate space. |
+| `viewport` | `1440x900` | The **default** emulated viewport of every tab — `browser_embedded_emulate` overrides it per tab, and `reset` comes back here. |
 | `xvfbDisplay` | `:99` | Preferred X display; the next free one is used if taken. |
 | `port` | `0` | Fixed DevTools port; `0` picks a free one. |
 | `startUrl` | `about:blank` | First URL of each session's fresh tab. |
@@ -167,7 +179,7 @@ Override any field from your own patch layer (`~/.dsh/cordis.patch.yml`, or the 
 | `askHumanTimeoutSeconds` | `600` | Default budget of `browser_embedded_ask_human`. |
 | `idleShutdownMinutes` | `10` | Stop the browser — and with it every session's tab — after this much idle time; `0` never stops it. Reaping is lossless: a tab reopens at its last URL, and the profile keeps every login. |
 | `autoStart` | `false` | Start the browser with the host instead of on first use. |
-| `lazyTools` | `true` | Publish the ten tools only after the `browser-use` skill is invoked; `false` registers the suite at load. |
+| `lazyTools` | `true` | Publish the twelve tools only after the `browser-use` skill is invoked (a host-wide gate: one session opens it for all); `false` registers the suite at load. |
 | `startTimeoutMs` | `20000` | How long to wait for the DevTools endpoint after launch. |
 
 ## Security notes

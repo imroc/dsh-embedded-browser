@@ -50,8 +50,53 @@ function check(name, ok, detail = '') {
   console.log(`${ok ? '✓' : '✗'} ${name}${detail === '' ? '' : ` — ${detail}`}`)
 }
 
+/** Read a JPEG's SOF dimensions — the size the panel actually paints. */
+function jpegSize(buffer) {
+  let offset = 2
+  while (offset + 9 < buffer.length) {
+    if (buffer[offset] !== 0xff) break
+    const marker = buffer[offset + 1]
+    const length = buffer.readUInt16BE(offset + 2)
+    if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+      return { width: buffer.readUInt16BE(offset + 7), height: buffer.readUInt16BE(offset + 5) }
+    }
+    offset += 2 + length
+  }
+  return { width: 0, height: 0 }
+}
+
+/**
+ * Start a screencast the way the hub does and report the frame it produces.
+ *
+ * The panel maps pointer events through the page viewport rather than through
+ * this frame, and the reason is measurable here: Chrome scales a frame down to
+ * fit the caps, so past a certain viewport the two stop agreeing.
+ */
+async function measureFrame(sessionId) {
+  const page = manager.session(sessionId).page
+  const frame = new Promise((resolve) => {
+    const off = page.on('Page.screencastFrame', (params) => {
+      off()
+      resolve(Buffer.from(params.data, 'base64'))
+    })
+    setTimeout(() => resolve(undefined), 8000)
+  })
+  await page.send('Page.startScreencast', { format: 'jpeg', quality: 55, maxWidth: 1280, maxHeight: 800, everyNthFrame: 1 })
+  const data = await frame
+  await page.send('Page.stopScreencast').catch(() => {})
+  return data === undefined ? { width: 0, height: 0 } : jpegSize(data)
+}
+
+/** What the page believes about its own environment. */
+const METRICS = 'JSON.stringify({w:innerWidth,h:innerHeight,dpr:devicePixelRatio,coarse:matchMedia("(pointer: coarse)").matches,iphone:navigator.userAgent.includes("iPhone")})'
+
 // ---------------------------------------------------------------- test page
-const page = (title, body) => `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title></head><body>${body}</body></html>`
+// The viewport meta is what makes a page lay out at the device width. Without it
+// Chrome gives a `mobile: true` emulation the *default* mobile viewport of 980 CSS
+// pixels and zooms out, exactly as a real phone would — `/plain` exists to keep
+// that behaviour in the suite instead of leaving it to be rediscovered.
+const page = (title, body, meta = '<meta name="viewport" content="width=device-width, initial-scale=1">') =>
+  `<!doctype html><html><head><meta charset="utf-8">${meta}<title>${title}</title></head><body>${body}</body></html>`
 const site = http.createServer((req, res) => {
   const url = new URL(req.url, 'http://127.0.0.1')
   const send = (code, body, headers = {}) => {
@@ -60,6 +105,9 @@ const site = http.createServer((req, res) => {
   }
   if (url.pathname === '/') {
     return send(200, page('Smoke Home', '<h1>Smoke Home</h1><a href="/login">进入登录页</a><p id="marker">initial</p>'))
+  }
+  if (url.pathname === '/plain') {
+    return send(200, page('Smoke Plain', '<h1>no viewport meta</h1><p id="marker">plain</p>', ''))
   }
   if (url.pathname === '/login' && req.method === 'GET') {
     return send(
@@ -159,7 +207,32 @@ const manager = new BrowserManager({
     maxElements: 40,
   },
   logger: { info: (m) => console.log(`  [browser] ${m}`), debug: () => {}, warn: (m) => console.log(`  [warn] ${m}`) },
+  // The plugin's own wiring (`lib/index.js`), minus its stream sync: a browser
+  // event has to reach the panels, or a resize the human never hears about would
+  // aim their clicks at the old geometry.
+  onEvent: () => {
+    if (hub === undefined) return
+    void hub.pushState({ force: true })
+  },
 })
+// A run that dies from a signal never reaches the `finally` below, and Chrome and
+// its private Xvfb survive the process that owned them. `timeout`, a closed
+// pipe, and an interrupted terminal all arrive this way; measured on 2026-09-21,
+// three interrupted runs left three Xvfb processes alive for three hours. Stop
+// the browser defensively before exiting.
+let stoppingOnSignal = false
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(signal, () => {
+    if (stoppingOnSignal) return
+    stoppingOnSignal = true
+    console.error(`\n${signal}: stopping the browser before exit`)
+    void manager
+      .stop()
+      .catch(() => {})
+      .finally(() => process.exit(1))
+  })
+}
+
 hub = new ScreencastHub({
   manager,
   logger: { info: () => {}, debug: (m) => console.log(`  [hub] ${m}`), warn: (m) => console.log(`  [hub] ${m}`) },
@@ -213,6 +286,130 @@ try {
   const shot = await manager.screenshot(SESSION_A)
   check('screenshot returns PNG bytes', shot.data.length > 1000 && shot.data.subarray(1, 4).toString() === 'PNG', `${shot.data.length} bytes`)
 
+  // ------------------------------------------------ per-tab device emulation
+  // CDP emulation is a per-*target* override, and that is what makes it safe in a
+  // one-tab-per-session browser: it changes one session's tab without touching the
+  // Chrome process (no restart, no config write) and without touching anybody
+  // else's tab. Both halves are checked, plus the undo — a tab left narrower than
+  // its owner believes is a bug nothing in the transcript would ever show.
+  await manager.navigate(SESSION_C, `${siteUrl}/login`)
+  await sleep(300)
+  const desktopMetrics = JSON.parse(await manager.evaluate(SESSION_C, METRICS))
+  const emulated = await manager.emulate(SESSION_C, { device: 'iphone-14' })
+  const phoneMetrics = JSON.parse(await manager.evaluate(SESSION_C, METRICS))
+  check(
+    'a device preset resizes one tab to the preset',
+    phoneMetrics.w === 390 && phoneMetrics.h === 844 && phoneMetrics.dpr === 3 && phoneMetrics.coarse === true && phoneMetrics.iphone === true,
+    JSON.stringify(phoneMetrics),
+  )
+  check(
+    'the emulated viewport is what the session reports',
+    emulated.session.viewport?.width === 390 && emulated.session.viewport?.height === 844 && emulated.session.emulation?.device === 'iphone-14',
+    `${JSON.stringify(emulated.session.viewport)} device=${emulated.session.emulation?.device}`,
+  )
+  const untouched = await manager.status(SESSION_A)
+  check(
+    'emulating one session leaves the others alone',
+    desktopMetrics.w === 1280 && untouched.session.viewport?.width === 1280 && untouched.session.viewport?.height === 800,
+    `A=${JSON.stringify(untouched.session.viewport)} (C was ${desktopMetrics.w}x${desktopMetrics.h})`,
+  )
+  const cUserField = (await manager.snapshot(SESSION_C)).elements.find((e) => e.tag === 'input' && (e.label ?? '').includes('用户名'))
+  await manager.type(SESSION_C, cUserField.index, 'emulated')
+  const emulatedType = await manager.evaluate(SESSION_C, 'document.querySelector("input[name=user]").value')
+  check('the AI input path still lands under mobile emulation', String(emulatedType).endsWith('emulated'), JSON.stringify(emulatedType))
+  check(
+    'the mobile viewport survives the reflow of typing',
+    JSON.parse(await manager.evaluate(SESSION_C, METRICS)).w === 390,
+    await manager.evaluate(SESSION_C, 'String(innerWidth)'),
+  )
+
+  // A real phone laid out a page that declares no viewport meta at 980 CSS pixels
+  // and zoomed out, and so does this: `device` is fidelity to a device, not a
+  // shorthand for "narrow". The explicit pair is the one that pins a layout width
+  // whatever the page declares.
+  await manager.navigate(SESSION_C, `${siteUrl}/plain`)
+  await sleep(300)
+  await manager.emulate(SESSION_C, { device: 'iphone-14' })
+  const noMeta = JSON.parse(await manager.evaluate(SESSION_C, METRICS))
+  check(
+    'a device preset follows the page, as a phone would',
+    noMeta.w === 980 && noMeta.coarse === true,
+    `no viewport meta → layout viewport ${noMeta.w} CSS px`,
+  )
+  await manager.emulate(SESSION_C, { width: 390, height: 844 })
+  check(
+    'an explicit viewport pins the layout width instead',
+    JSON.parse(await manager.evaluate(SESSION_C, METRICS)).w === 390,
+    await manager.evaluate(SESSION_C, 'String(innerWidth)'),
+  )
+  await manager.navigate(SESSION_C, `${siteUrl}/login`)
+  await sleep(300)
+  await manager.emulate(SESSION_C, { device: 'iphone-14' })
+
+  // ------------------------------------------------------------ page evaluation
+  const nodeValue = await manager.evalInPage(SESSION_C, 'document.querySelector("input[name=user]")')
+  check('eval describes a DOM node instead of failing', nodeValue === '[Node <input>]', JSON.stringify(nodeValue))
+  const circular = await manager.evalInPage(SESSION_C, '(() => { const a = { n: 1 }; a.self = a; return a })()')
+  check('eval survives a circular structure', circular?.n === 1 && circular?.self === '[Circular]', JSON.stringify(circular))
+  const awaited = await manager.evalInPage(SESSION_C, 'Promise.resolve([1, 2, 3])')
+  check('eval awaits a promise result', Array.isArray(awaited) && awaited.length === 3, JSON.stringify(awaited))
+  const computed = await manager.evalInPage(SESSION_C, 'getComputedStyle(document.body).display')
+  check('eval reads a computed style', computed === 'block', JSON.stringify(computed))
+  let evalFailure
+  try {
+    await manager.evalInPage(SESSION_C, '(() => { throw new Error("boom") })()')
+  } catch (error) {
+    evalFailure = error.message
+  }
+  check('eval reports a page exception as an error', String(evalFailure).includes('boom'), String(evalFailure))
+
+  await manager.emulate(SESSION_C, { theme: 'dark' })
+  check(
+    'theme emulation flips prefers-color-scheme',
+    (await manager.evalInPage(SESSION_C, 'matchMedia("(prefers-color-scheme: dark)").matches')) === true,
+  )
+
+  // Past the hub's caps Chrome scales the frame down instead of the page up, so the
+  // panel's canvas no longer matches the viewport — the measurement the client's
+  // pointer mapping is built on (references/PITFALLS.md #19).
+  await manager.emulate(SESSION_C, { device: 'ipad-mini' })
+  await sleep(300)
+  const capped = await measureFrame(SESSION_C)
+  check(
+    'a viewport past the screencast cap arrives downscaled',
+    capped.width > 0 && capped.height <= 800 && capped.width < 744,
+    `page 744x1133 → frame ${capped.width}x${capped.height} (cap 1280x800)`,
+  )
+
+  const reset = await manager.emulate(SESSION_C, { reset: true })
+  const afterReset = JSON.parse(await manager.evaluate(SESSION_C, METRICS))
+  check(
+    'reset restores the environment the tab was born with',
+    afterReset.w === desktopMetrics.w && afterReset.h === desktopMetrics.h && afterReset.dpr === 1 && afterReset.coarse === false && afterReset.iphone === false,
+    JSON.stringify(afterReset),
+  )
+  check(
+    'reset clears the colour-scheme override',
+    reset.session.emulation?.theme === undefined &&
+      (await manager.evalInPage(SESSION_C, 'matchMedia("(prefers-color-scheme: dark)").matches')) === false,
+  )
+
+  const refused = async (spec) => {
+    try {
+      await manager.emulate(SESSION_C, spec)
+      return 'accepted'
+    } catch (error) {
+      return error.message
+    }
+  }
+  const emptyCall = await refused({})
+  check('emulate refuses an empty call', String(emptyCall).includes('nothing to change'), String(emptyCall))
+  check('emulate refuses an unknown device', String(await refused({ device: 'nokia-3310' })).includes('unknown device'))
+  check('emulate refuses half a viewport', String(await refused({ width: 390 })).includes('together'))
+  check('emulate refuses reset combined with anything else', String(await refused({ reset: true, theme: 'dark' })).includes('cannot be combined'))
+  await manager.closeSession(SESSION_C, { reason: 'emulation probe' })
+  await sleep(200)
+
   // ------------------------------------------------------- focus gate (#12)
   // A freshly opened page has nothing focused, and `Input.insertText` is then a
   // silent no-op: success-shaped response, no change, no error. This is the
@@ -263,6 +460,19 @@ try {
   check('panel hello carries its session id', panelA.last('hello')?.sessionId === SESSION_A && panelB.last('hello')?.sessionId === SESSION_B)
   check('panel receives binary jpeg frames', panelA.frames.length > 0 && panelA.frames[0].subarray(0, 2).toString('hex') === 'ffd8', `${panelA.frames.length} frames`)
   check('panel state is scoped to its session', panelB.last('state')?.url?.endsWith('/login') === true, panelB.last('state')?.url)
+
+  // The panel maps its pointer events through the viewport the host reports, so a
+  // resize the human never hears about would aim their clicks at the old geometry.
+  await manager.emulate(SESSION_B, { device: 'iphone-14' })
+  await sleep(400)
+  check(
+    'a resize reaches the panel before the human can click',
+    panelB.last('state')?.viewport?.width === 390 && panelB.last('state')?.viewport?.height === 844,
+    JSON.stringify(panelB.last('state')?.viewport),
+  )
+  await manager.emulate(SESSION_B, { reset: true })
+  await sleep(400)
+  check('the panel follows the reset too', panelB.last('state')?.viewport?.width === 1280, JSON.stringify(panelB.last('state')?.viewport))
 
   // Only the session in front may own the real screencast; the other one is
   // served by polled screenshots (Chrome streams the active tab only, #13).
@@ -443,6 +653,25 @@ try {
   await manager.stop()
   const stopped = await manager.status()
   check('stop releases the browser', stopped.running === false && manager.sessions.size === 0)
+
+  // Startup has to reject leftovers. Chrome restores the previous session after an
+  // unclean exit, and this browser always dies with the host's cgroup (every
+  // dsh-web restart SIGKILLs it), so without the sweep the tab set grows on every
+  // restart — measured on a live host on 2026-09-23: **76 page targets**, one
+  // renderer each, still holding pages from sessions disposed days earlier.
+  // Simulated here the way it actually arrives: tabs that exist before `start()`
+  // returns, with no session record owning any of them.
+  await manager.ensureBrowser()
+  await manager.cdp.newPage('about:blank')
+  await manager.cdp.newPage('about:blank')
+  const strayBefore = (await manager.cdp.pages()).length
+  const swept = await manager.sweepRestoredTabs()
+  const strayAfter = (await manager.cdp.pages()).length
+  check(
+    'startup sweeps the tabs a restored session left behind',
+    strayBefore === 3 && strayAfter === 1 && swept === 2,
+    `${strayBefore} page targets → closed ${swept} → ${strayAfter}`,
+  )
 
   // A reap must not cost a session its page: reopening reuses the last URL it was
   // on, and the shared profile keeps the login.

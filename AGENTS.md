@@ -10,7 +10,7 @@ This file is the project-facing companion to `README.md`: the README explains th
 
 ```
 lib/index.js        host half: config, wiring, session-tab lifecycle, prompt hint, tool gate
-lib/lazy.js         the lazy gate: when the ten tools get published, plus the reload replay
+lib/lazy.js         the lazy gate: when the tools get published, plus the reload replay
 lib/browser.js      Chrome lifecycle (Xvfb + spawn + CDP) and the sessionId -> tab registry
 lib/cdp.js          dependency-free Chrome DevTools Protocol client
 lib/ws.js           dependency-free RFC 6455 server (one upgrade route)
@@ -19,11 +19,11 @@ lib/screencast.js   per-session stream hub: which tab owns the screencast, polle
 lib/human.js        the ask-human broker (one pending request per session, timeout, resume)
 lib/routes.js       /api/dsh-embedded-browser routes (session-scoped ones carry a session id,
                     plus the host-level /sessions and /health) and the stream upgrade
-lib/tools.js        the ten model-facing tools, each bound to its calling session
+lib/tools.js        the twelve model-facing tools, each bound to its calling session
 lib/client.js       browser half: the right-Sidebar tab (type + two keyed seats), the
                     auto-open watcher, and the panel itself (no build step)
-test/smoke.mjs      43-check standalone core test — no DSH needed
-test/lazy-gate.mjs  19-check standalone test for the gate: reveal paths, reload replay,
+test/smoke.mjs      66-check standalone core test — no DSH needed
+test/lazy-gate.mjs  22-check standalone test for the gate: reveal paths, reload replay,
                     near-misses, disposal (fake context, no DSH, no browser)
 test/human-input.mjs real pointer/keyboard events into the panel canvas, verified in the page
 cordis.patch.yml    bundle layer: inserts the plugin row (id: embedded-browser)
@@ -47,7 +47,7 @@ node test/smoke.mjs        # core: per-session tabs, CDP ops, real input, stream
 node --check lib/client.js # the client half has no build step; syntax-check it
 ```
 
-- `test/smoke.mjs` drives a **real Chrome** (found the same way the plugin finds it: `browserPath`, `PATH`, then the Playwright/Puppeteer caches; Xvfb is optional) and needs no DSH. Its 43 checks are the definition of "the per-session model still holds": two sessions get two tabs, the tabs do not steer each other, a click-then-type really lands in the field (the focus gate), panel input reaches **its own** session only, the watched session owns the screencast while the other is served by polled frames, a panel reconnect does not kill the next stream, one activation makes a never-activated target accept input, two sessions can wait on a human at the same time, and a login survives a browser restart.
+- `test/smoke.mjs` drives a **real Chrome** (found the same way the plugin finds it: `browserPath`, `PATH`, then the Playwright/Puppeteer caches; Xvfb is optional) and needs no DSH. Its 66 checks are the definition of "the per-session model still holds": two sessions get two tabs, the tabs do not steer each other, a click-then-type really lands in the field (the focus gate), panel input reaches **its own** session only, the watched session owns the screencast while the other is served by polled frames, a panel reconnect does not kill the next stream, one activation makes a never-activated target accept input, two sessions can wait on a human at the same time, a device preset resizes exactly one tab and `reset` undoes it, startup sweeps the tabs a restored session left behind, `eval` answers with JSON for values Chrome cannot round-trip, a resize reaches the panel, and a login survives a browser restart.
 - `test/lazy-gate.mjs` covers the gate's whole contract the way a live run cannot set it up on demand: a *past* invocation found after a reload, a session created later replaying its own log, and the near-misses that must **not** open the gate (a failed `skill` call, a different skill, a `tool/call` with no successful result). It needs a context stub, not a host.
 - What neither suite reaches is the browser page: the Sidebar seats and the auto-open watcher are verified by hand against a running host (open a browser, watch the tab appear, hide it and watch the stream stop).
 - **Host half changes need a DSH restart** (`bundle` rows are a boot-time composition change, and Cordis' cascaded loader caches modules — editing a linked plugin's `lib/*.js` does *not* hot-reload).
@@ -72,6 +72,9 @@ node --check lib/client.js # the client half has no build step; syntax-check it
 14. The Sidebar tab type is **two halves under one id**: `ctx.sidebarRightTabs.register({ id: TAB_ID, kind: TAB_KIND, … })` is the static definition, and the keyed seats `sidebar.right.pane.tab` / `sidebar.right.pane.tab.title` must register under the **same `TAB_ID`** (the body) and be reachable by **`TAB_KIND`** (`ctx.sidebarRight.openTabIn(sessionId, TAB_KIND)`). Registering only one half renders the owner's "nothing can view this" notice instead of failing loudly (#15).
 15. `lazyTools` defaults to `true`, and the gate's skill name is the hard-coded `SKILL_NAME` in `lib/lazy.js`. Renaming the skill means editing that constant, and the **reload replay must survive**: an event-only gate stays shut forever after a plugin reload, because the invocation that opened it is in the past (#16, upstream Tencent/BrowserSkill #269). Keep the arm-time replay of live session logs plus the `session/created` listener, and remember the reveal is host-wide — `ctx.tools.register` publishes into one registry every session reads.
 16. The panel's stream is opened from `props.useTabInfo().tab.visible` (`visible !== false`), never from "the component mounted": a hidden tab that holds a WebSocket also keeps asking for the browser foreground, which quietly breaks whoever is watching (#14).
+17. **Emulation is per target and never inherited.** `browser_embedded_emulate` writes CDP overrides onto *one* tab — that is what makes it safe in a one-tab-per-session browser (no restart, no config write, no effect on any other session) — and a *replaced* tab starts from `defaultEmulation()` again. "Reset" means the configured `viewport`, not Chrome's real window: the plugin pins one viewport so the panel has a stable coordinate space. Every apply re-sends every field including its off form (`userAgent: ''`, `enabled: false`, `features: []`), because the overrides are independent (#19).
+18. **The panel maps pointer events through the *reported page viewport*, never through the canvas's intrinsic size.** Chrome scales screencast frames down to the hub's `maxWidth`/`maxHeight`, so canvas size equals the viewport only while the viewport fits inside those caps; past that they diverge (an iPad preset, a 1920-wide desktop check) and a canvas-based mapping aims the human's clicks tens of percent away. The frame is the whole viewport with its aspect preserved, so the canvas *box* ratio is the exact mapping — and the host must push `viewport` when it changes (`pushState` compares it), or the panel keeps using the old geometry (#20, #21).
+19. **`eval` must stay total.** `Runtime.evaluate` with `returnByValue` answers an object Chrome cannot round-trip with an empty `{}` rather than an error — a `CSSStyleDeclaration` is the everyday case — so `evaluateJson` fetches the value by reference and pushes it through the bounded serializer. Never trade that back for one round trip: a silent empty answer is worse than a loud failure, and "the value was not serializable" is not something a model can act on (#22).
 
 ## Releasing
 

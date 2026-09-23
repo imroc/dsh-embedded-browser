@@ -66,9 +66,9 @@ The one thing given up: there is no host-wide overview any more (the root `main`
 
 ## Why the tools are published lazily
 
-Tool schemas are paid for on **every** request: the suite travels with each turn's payload whether or not the turn touches a browser. A skill's catalog entry, by contrast, is two lines, and its body is read only when the model decides to read it. Measured on the development host: this plugin's ten `browser_panel_*` schemas (the prefix these tools carried before the 0.3.0 rename) serialize to **4,731 bytes**, the BrowserSkill plugin's six `browser_*` schemas to **10,866 bytes**, and all sixteen together to **15,597 bytes** — a browser nobody asked for is not free.
+Tool schemas are paid for on **every** request: the suite travels with each turn's payload whether or not the turn touches a browser. A skill's catalog entry, by contrast, is two lines, and its body is read only when the model decides to read it. Measured on the development host: before the 0.3.0 rename this plugin's ten `browser_panel_*` schemas serialized to **4,731 bytes**, the BrowserSkill plugin's six `browser_*` schemas to **10,866 bytes**, and all sixteen together to **15,597 bytes**. The suite is twelve tools now and measures **7,329 bytes** (2026-09-23), the device presets of `browser_embedded_emulate` being the single most expensive schema at 1,721 bytes — still less than the six `browser_*` tools it competes with. A browser nobody asked for is not free.
 
-So the default (`lazyTools: true`) keeps the ten schemas off the tool list until something proves the model is doing browser work: a successful `skill` call naming `browser-use`, a `/browser-use` gesture from the human, or a successful invocation found in a session log at arm time.
+So the default (`lazyTools: true`) keeps those schemas off the tool list until something proves the model is doing browser work: a successful `skill` call naming `browser-use`, a `/browser-use` gesture from the human, or a successful invocation found in a session log at arm time.
 
 Three properties of that gate are deliberate:
 
@@ -125,7 +125,7 @@ A profile plugin is linked into a running host process, and a bare `import` of a
 - **One viewport per instance**, shared by every tab, so the panel canvas maps 1:1 onto page coordinates with no resize plumbing. The emulated viewport is applied per tab and is deliberately *not* cleared when a stream stops, so coordinates never shift between two sizes mid-mapping (#10).
 - **A polled session is ~7 fps**, and its first frame can be cold while another tab owns the screencast.
 - **The sidebar tab is not pinned and there is no overview.** Cross-session awareness is one dot on the chip of the session that is waiting; finding it means switching to that session.
-- **A gated suite can be missing.** With `lazyTools: true` and no `browser-use` skill installed, the ten tools are never published — the price of not paying their schemas on every request.
+- **A gated suite can be missing.** With `lazyTools: true` and no `browser-use` skill installed, the tools are never published — the price of not paying their schemas on every request.
 - **File upload by the human is not proxied** through the canvas; the AI can upload via CDP when it has a path.
 - **The panel is not a general remote desktop**: it shows the session's browser tab, nothing else.
 - **No shared-browser mode.** 0.2.0 removed it rather than keeping it behind a flag; the plugin had no users yet, and a host-wide page is the wrong default for a multi-session harness.

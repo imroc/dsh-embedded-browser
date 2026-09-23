@@ -246,3 +246,77 @@ Alternatively, point `profileDir` at the old directory and keep it. Either way, 
 **Cause**: on HTTP/1.1 a browser allows roughly **six concurrent connections per origin, shared by every tab and window in that profile**. A connection that never ends sits on a slot for as long as it lives, and this plugin holds exactly one while its tab is visible: the `/api/dsh-embedded-browser/stream` WebSocket carrying the live picture. Other plugins hold one each for their own event streams, so the budget is spent before any ordinary `fetch` runs — and a request with no free connection *queues inside the browser*, which is why the server sees nothing at all and curl tells you the server is fine.
 
 **Fix**: treat a persistent connection as a budget line item, not as free. Keep at most one of them per tab (`tab.visible` gates this plugin's socket for exactly that reason — see #14, a hidden tab that holds a socket spends a slot on nobody's behalf), and stop the connection as soon as it has nothing to show. For the ordinary requests the plugin makes (the auto-open poll), stay unhurried: five seconds is plenty for "the AI just opened a browser", and it is one fewer request competing with the GUI's own traffic. When the GUI misbehaves while the server is fine, count the persistent connections of one origin before debugging anything else — a wrong count looks exactly like a broken backend.
+
+## 19. Device emulation is device *fidelity*, not "a narrow window"
+
+**Symptom**: `browser_embedded_emulate({ device: 'iphone-14' })` succeeds, the status reports `viewport: 390x844`, the screenshot comes back… and the page is laid out at desktop width. Reading `innerWidth` in the page returns **980**, not 390. Nothing failed, and the same call behaves correctly on the next site.
+
+**Cause**: that is what a real iPhone does, and CDP's `mobile: true` is what turns the behaviour on. A page that declares no `<meta name="viewport" content="width=device-width, initial-scale=1">` opts out of matching the device: Chrome falls back to the classic **980 CSS pixel** layout viewport and zooms the whole page out to fit the device width. Measured on this host (`test/smoke.mjs`, `/plain` route): `innerWidth` 980, `innerHeight` 2121 for a 390x844 device — the 980/390 ratio, i.e. the page is scaled, not reflowed.
+
+**Fix**: two different intentions, two different calls, and say which one you mean.
+
+- *Fidelity* — "how does this look on a phone?" → `device`. The page decides, exactly as it would on the phone, so the check is only meaningful for a page that declares the viewport meta. A page without it genuinely renders zoomed-out on a phone, and the screenshot showing a shrunken desktop layout is the correct answer.
+- *A pinned layout width* — "show me this at 390 CSS pixels" → `width` + `height` with no `mobile`. That sets the layout viewport outright, whatever the page declares.
+
+Do not "fix" this by forcing `mobile: false` inside the preset path: it would make the embedded channel disagree with the BrowserSkill channel (whose presets set `mobile: true` as well) and would quietly turn a device check into a window check.
+
+## 20. A screencast frame is not the page viewport
+
+**Symptom**: the human watching the sidebar panel clicks a link and the browser activates something else — or nothing at all. The AI's own calls still work, the panel picture looks right, and the mis-aim grows with how far from the top-left the target sits.
+
+**Cause**: `Page.startScreencast` scales frames down to fit the hub's `maxWidth`/`maxHeight`, and the panel used to map its pointer events through the canvas's *intrinsic* size — which is the frame, not the page. While every tab ran at the configured `viewport` (1440x900 in production, and the hub caps at exactly that) the two numbers were identical, so the mapping was right by coincidence. Per-tab emulation broke the coincidence. Measured on this host with caps of 1280x800:
+
+| Page viewport | Screencast frame | Canvas-based mapping error |
+|---|---|---|
+| 1280x800 (default) | 1280x800 | none — the case the old code was written for |
+| 390x844, dpr 3 | 390x844 | none |
+| 744x1133 (ipad-mini) | 591x900 | 26% |
+| 1920x1080 | 1440x810 | 33% |
+
+**Fix**: map through the **page viewport the host reports**, using the canvas box as a ratio (`(clientX - rect.left) / rect.width * viewport.width`). The frame is the whole viewport with its aspect preserved and no letterboxing, so the ratio is exact at any scale and any device pixel ratio; the canvas's intrinsic size survives only as the fallback for the first moments before a viewport has been reported. Two halves have to agree for this to hold — see #21.
+
+## 21. A resize the panel never hears about is worse than no resize
+
+**Symptom**: after the AI changes the viewport, the panel picture changes but the human's clicks land as if nothing had — until something *else* about the session changes, at which point it silently starts working.
+
+**Cause**: `pushState` decided whether to broadcast by comparing `url`/`title`/`open`/`running`/`human`/`stream`, and it built the message with a `viewport` field that comparison never looked at. A viewport-only change (exactly what `browser_embedded_emulate` produces) therefore updated the host's own bookkeeping, sent the new screencast geometry… and no message. The panel kept mapping through the geometry it had been told an hour ago.
+
+**Fix**: compare every field whose change the client acts on, `viewport` included. The general rule worth keeping: a field added to a pushed payload is not plumbed until it appears in that comparison, because `force: true` only saves the call that triggers it, not the polling that follows.
+
+## 22. `returnByValue` answers an unserializable object with an empty object
+
+**Symptom**: an eval-style call returns `{}` for `getComputedStyle(document.body)`, `{}` for a DOM node's own properties, and throws an unhelpful CDP error for a cyclic object. The expression was right; the answer is silently empty.
+
+**Cause**: `Runtime.evaluate` with `returnByValue: true` can only return what Chrome can round-trip. For a host object with no own enumerable string keys it does not complain — it hands back `{}`, which is indistinguishable from a genuinely empty object. A page inspection reaches for exactly those values.
+
+**Fix**: fetch the value by reference and serialize it in the page. `Session.evaluateJson` evaluates with `returnByValue: false`, then `Runtime.callFunctionOn` runs a **total** serializer over the returned object: every value has an output, results are bounded (nodes, depth, keys, string length), DOM nodes become `[Node <input>]`, cycles become `[Circular]`, functions become `[Function name]`, and an oversized result comes back as a truncated preview with its size. That is two round trips instead of one, and it is the price of never answering a question with a lie. `Runtime.evaluate`'s own `timeout` is set as well: without it a `while (true)` in the page wedges the renderer for every later call, including the ones the human's panel needs.
+
+## 23. Every restart adds a browser session's worth of tabs, forever
+
+**Symptom**: the embedded Chrome's process list grows without bound — one renderer per tab, dozens of them, on a host where a single session is doing browser work. Measured on 2026-09-23: **76 page targets**, holding pages from sessions that had been disposed days earlier (`rainbow.woa.com` from another workspace, `show-me-*.html` self-check pages, a pile of `about:blank`). Memory climbs, the human's window has a tab strip nobody wants, and nothing in the log says a word about it.
+
+**Cause**: Chrome restores the previous session's tabs after an exit it reads as a crash, and this browser **always** ends that way in production: every `dsh-web` restart tears down the whole cgroup, and the journal shows Chrome being killed with SIGKILL. So each restart hands Chrome a new "previous session" to restore at the next start, and the set only grows — the plugin owns its own tabs and never looks at the rest. (The same thing happens in development: any `BrowserManager` run against the same `profileDir` that exits uncleanly leaves its tabs behind.)
+
+**Fix**: claim the browser at startup. `sweepRestoredTabs()` runs right after the CDP connection opens — before any session tab can exist — and closes every page target except one (Chrome quits when its last tab closes; which one survives does not matter, because a session's tab is created and activated on first use, and the reap already reopens each session at its own last URL). Belt and braces, the flags make the intent explicit rather than relying on Chrome's default: keep `--hide-crash-restore-bubble` for the UI half, and treat the sweep as the part that actually holds, because it is the only part that is verifiable from a test.
+
+```js
+const version = await fetchVersion(port, this.config.startTimeoutMs ?? 20_000)
+this.cdp = await Cdp.connect(port, { version })
+await this.sweepRestoredTabs() // ← anything already here belongs to a previous process
+```
+
+The lesson worth carrying to any long-lived browser you start on the user's behalf: **you did not open those tabs, so count them before you trust the process** — `curl http://127.0.0.1:<port>/json/list` — because a leak that only grows on restarts is invisible in exactly the situation (a long-running host) where it hurts most.
+
+## 24. After a host restart the gate is shut again — and the replay does not reopen it
+
+**Symptom**: `dsh-web` restarts; a session that successfully loaded `browser-use` an hour earlier calls `browser_embedded_navigate` and gets `unknown tool`. Loading the skill again publishes all twelve immediately. Nothing is broken — the plugin is mounted, its routes answer — the *gate* is simply closed again, and the third path the README advertises ("a past successful invocation found in a session log — this third path is what reopens the gate after a plugin reload") did not fire. Measured on 2026-09-23, twice, on two consecutive restarts (17:21 and 17:46).
+
+**Why the arm-time replay cannot cover this case**: it walks `ctx.sessions.list()`, and that returns only the **live in-memory store**. A freshly booted host has no live sessions — sessions enter the store when one of their turns runs — so the loop iterates an empty list and finds nothing. The replay is a *reload* feature (a running host still has its sessions), not a *restart* feature; the two are easy to conflate because both end with "the plugin just mounted".
+
+**What is not yet separated**: whether the `session/created` listener then catches up. `announce()` is called from the agent loop when a session's turn starts, so a restored session does emit it; the open question is whether the session's event log is readable at that instant, and whether the tool list a turn sees is snapshotted before the gate flips (it is built per request, so a gate that opened *during* a turn would only be visible in the *next* one). Both possibilities end in the same place for a caller, so measure before assuming either:
+
+- after a restart, treat the tools as **absent** until something invokes the skill;
+- invoking `browser-use` is always correct and cheap, and it is the routing step a browser task should take anyway — so the cost is one skill read, not a broken feature;
+- do not "fix" this by defaulting `lazyTools` to `false`: that pays 7.3 KB of schemas on every request of every session, including the ones that never touch a browser.
+
+A real fix has to read the **persisted** session log at arm time rather than the live store (or key the reveal on something process-independent). Until then the honest documentation is "the gate is per process", which is what the tool descriptions and this entry say.

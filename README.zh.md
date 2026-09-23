@@ -20,13 +20,13 @@
 
 ### 工具（懒注册）
 
-这 10 个 `browser_embedded_*` 工具**不会在插件加载时就注册**。工具 schema 每一轮请求都要计费，所以默认它们不进工具列表，直到有证据表明模型确实在做浏览器任务：
+这 12 个 `browser_embedded_*` 工具**不会在插件加载时就注册**。工具 schema 每一轮请求都要计费，所以默认它们不进工具列表，直到有证据表明模型确实在做浏览器任务：
 
 - 成功调用 `skill` 工具且技能名为 `browser-use`；
 - 人类在会话里发 `/browser-use` 手势；
 - 会话历史日志里存在过一次成功调用——第三条路正是插件重载后重新开闸的依据。
 
-也就是说：**没有那个技能，就没有这批工具。** 装插件的同时请一并装 `browser-use` 技能（见[安装](#安装)）——它是浏览器任务的入口技能（同时覆盖 BrowserSkill 通道），调用它就是发布这 10 个工具的动作。开闸是宿主级的、也是永久的：一旦打开，本宿主进程内**所有会话**都能看到这批工具（`ctx.tools.register` 写进的是同一个宿主级注册表）。把 `lazyTools` 设为 `false` 则回到"加载即注册"。
+也就是说：**没有那个技能，就没有这批工具。** 装插件的同时请一并装 `browser-use` 技能（见[安装](#安装)）——它是浏览器任务的入口技能（同时覆盖 BrowserSkill 通道），调用它就是发布这批工具的动作。开闸是宿主级的、且**只在本进程内**有效：一旦打开，本宿主进程内**所有会话**都能看到这批工具（`ctx.tools.register` 写进的是同一个宿主级注册表），包括之后新建的会话——所以一个会话看见工具、另一个会话没读过技能，是完全正常的，不是插件没生效。 **重启 dsh-web 会开一个新进程、门闸也跟着回到关闭状态**：在某个会话再次调用技能之前工具都不在，因为重载回放只看得到"当下活着"的会话（详见 `references/PITFALLS.md` #24）。把 `lazyTools` 设为 `false` 则回到"加载即注册"。
 
 | 能力 | 工具 | 说明 |
 |---|---|---|
@@ -37,9 +37,21 @@
 | 填字段 | `browser_embedded_type` | 兼容 React/Vue 受控输入；`submit` 顺带回车 |
 | 按键 | `browser_embedded_press` | Enter、Tab、Escape、方向键、PageUp/Down 等 |
 | 滚动 | `browser_embedded_scroll` | down/up/left/right/top/bottom |
+| **改「环境」** | `browser_embedded_emulate` | 设备预设（`iphone-14` 等 7 个）/ 固定视口（`width`+`height`）/ 明暗（`theme`）；`reset: true` 还原成默认 |
+| **页面求值** | `browser_embedded_eval` | 在本会话页面里跑一段 JS，结果以有界 JSON 返回（切主题、读计算样式、断言状态） |
 | 看渲染 | `browser_embedded_screenshot` | PNG 以图片附件形式返回给模型 |
 | **请人帮忙** | `browser_embedded_ask_human` | 带你的说明把**本会话**的浏览器标签页调出来，并**等待**人类点「我已完成」 |
 | 关标签页 | `browser_embedded_close` | 关闭本会话的标签页；profile（含所有登录态）保留 |
+
+`browser_embedded_emulate` 是**每个标签页各自生效**的临时状态，改它不动配置、不重启、也不影响别的会话；`reset: true` 回到 `viewport` 配置的那个默认视口。`device` 预设的名字、尺寸、DPR 与 UA 与 BrowserSkill 通道的 `bsk emulate --device` **逐字段对齐**，所以在两条通道上「同一台设备」看到的是同一个页面。自检一个页面在手机上长什么样、在深色下长什么样，用这两个工具就够了：
+
+```
+browser_embedded_emulate  { "device": "iphone-14" }   →  browser_embedded_screenshot
+browser_embedded_emulate  { "theme": "dark" }         →  browser_embedded_screenshot
+browser_embedded_emulate  { "reset": true }
+```
+
+一个容易踩的差别：`device` 是**真机保真**，不是「窄窗口」。页面没写 `<meta name="viewport" content="width=device-width, initial-scale=1">` 时，Chrome 会照真机行为用 **980 CSS px** 布局再整体缩小——真实手机也是如此。只想把布局宽度钉成 390，就传 `width`/`height`（别带 `mobile`），它一定生效。
 
 面板侧（DSH Web UI）：
 
@@ -109,7 +121,7 @@ systemctl --user restart dsh-web      # 或你启动 `dsh web` 的方式
 
 ### 建议同时安装 `browser-use` 技能
 
-这 10 个工具被 `browser-use` 技能挡在门后，而这个技能**不在本包里**——它属于你的 profile 加载的技能。没有它（也没有 `/browser-use` 手势）门闸永远打不开，任何 `browser_embedded_*` 工具都不会被发布，模型只会告诉你这些工具不存在：
+这 12 个工具被 `browser-use` 技能挡在门后，而这个技能**不在本包里**——它属于你的 profile 加载的技能。没有它（也没有 `/browser-use` 手势）门闸永远打不开，任何 `browser_embedded_*` 工具都不会被发布，模型只会告诉你这些工具不存在：
 
 - 装一个全局的 **`browser-use`** 技能；或者
 - 设 `lazyTools: false` 改成加载即注册，代价是每一轮请求都要带上这些 schema。
@@ -118,7 +130,7 @@ systemctl --user restart dsh-web      # 或你启动 `dsh web` 的方式
 
 ## 验证
 
-1. 工具被门闸挡着，所以第一步先开闸：让 AI 用 `browser-use` 技能，或直接在会话里发 `/browser-use`。此后 10 个 `browser_embedded_*` 工具对本宿主进程里的**所有**会话可见。
+1. 工具被门闸挡着，所以第一步先开闸：让 AI 用 `browser-use` 技能，或直接在会话里发 `/browser-use`。此后 12 个 `browser_embedded_*` 工具对本宿主进程里的**所有**会话（含新建会话）可见。
 2. 让 AI 打开一个网址：
 
    ```
@@ -154,7 +166,7 @@ systemctl --user restart dsh-web      # 或你启动 `dsh web` 的方式
 | `mode` | `auto` | `auto` = 有 Xvfb 时 headed，否则 headless。 |
 | `screen` | `1440x900x24` | 私有 Xvfb 的分辨率。 |
 | `windowSize` | `1440x900` | headed 模式的窗口尺寸。 |
-| `viewport` | `1440x900` | 模拟的页面视口，所有会话标签页一致，也是右侧栏画布的坐标空间。 |
+| `viewport` | `1440x900` | 每个标签页的**默认**模拟视口（可用 `browser_embedded_emulate` 逐标签页临时改写，`reset` 回到这里）。 |
 | `xvfbDisplay` | `:99` | 首选 X display；被占用则顺延。 |
 | `port` | `0` | 固定 DevTools 端口；`0` 表示自动挑空闲端口。 |
 | `startUrl` | `about:blank` | 每个会话新标签页的首个地址。 |
@@ -167,7 +179,7 @@ systemctl --user restart dsh-web      # 或你启动 `dsh web` 的方式
 | `askHumanTimeoutSeconds` | `600` | `browser_embedded_ask_human` 的默认等待预算。 |
 | `idleShutdownMinutes` | `10` | 空闲多久后关闭浏览器（连同所有会话的标签页）；`0` 表示从不关。回收是无损的：标签页会按最后的 URL 重开，profile 里的登录态也都还在。 |
 | `autoStart` | `false` | 随宿主启动浏览器，而不是等第一次调用。 |
-| `lazyTools` | `true` | 只在 `browser-use` 技能被调用之后才发布这 10 个工具；`false` 改成加载即注册。 |
+| `lazyTools` | `true` | 只在 `browser-use` 技能被调用之后才发布这 12 个工具（宿主级开闸，一次开对所有会话生效）；`false` 改成加载即注册。 |
 | `startTimeoutMs` | `20000` | 启动后等待 DevTools 端点的上限。 |
 
 ## 安全须知
