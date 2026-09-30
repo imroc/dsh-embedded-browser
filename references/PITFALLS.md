@@ -320,3 +320,28 @@ The lesson worth carrying to any long-lived browser you start on the user's beha
 - do not "fix" this by defaulting `lazyTools` to `false`: that pays 7.3 KB of schemas on every request of every session, including the ones that never touch a browser.
 
 A real fix has to read the **persisted** session log at arm time rather than the live store (or key the reveal on something process-independent). Until then the honest documentation is "the gate is per process", which is what the tool descriptions and this entry say.
+
+## 27. "No Chrome/Chromium binary found" on a machine that has Chrome
+
+**Symptom**: on Windows, the first `browser_embedded_*` call fails with `no Chrome/Chromium binary found — install google-chrome-stable, or set browserPath in the plugin config`, and `npm test` dies the same way before its first check. Measured on 2026-09-30 on Windows 11 with Chrome 154 installed in its normal location; the same install works from Linux. The message names a Linux package, so it reads as "this machine has no browser" rather than "this code only looked in Linux places".
+
+**Cause**: four POSIX assumptions inside one lookup, none of which is visible from the error:
+
+| assumption | reality on Windows |
+|---|---|
+| `PATH_CANDIDATES` are Linux program names | the names carry `.exe` |
+| `process.env.PATH.split(':')` | the separator is `;`, so the whole PATH collapses into one entry and every `join` after it is meaningless |
+| Playwright caches live in `~/.cache` / `~/Library/Caches` | Playwright uses `%LOCALAPPDATA%\ms-playwright` |
+| a cache entry holds `chrome-linux64/chrome` or `chrome-linux/chrome` | the layouts are `chrome-win64\chrome.exe`, and Puppeteer adds a build directory: `chrome\win64-<rev>\chrome.exe` |
+
+The PATH half could not have worked on Windows even with the right names, because neither Chrome nor Edge is ever put on PATH by its installer. So "on PATH" and "installed" are different questions on that platform, and only the second one has a useful answer.
+
+**Fix**: ask each platform its own questions, and let the OS name its own directories rather than baking a drive in:
+
+- `PATH_CANDIDATES` splits by platform, `.exe` on Windows.
+- `INSTALL_CANDIDATES` adds the conventional Windows locations, each built from `PROGRAMFILES` / `PROGRAMFILES(X86)` / `LOCALAPPDATA` and skipped when that variable is unset — Chrome before Edge, so an explicit install wins over the one Windows ships.
+- `CACHE_ROOTS` picks `%LOCALAPPDATA%\ms-playwright` on Windows, and `~/.cache/puppeteer` needs no special case because Puppeteer already uses it there.
+- the cache lookup becomes a bounded search for the payload name (`chrome` / `chrome.exe`) instead of a fixed relative path, because the two drivers bury it at different depths — which also removes the old `!candidate.endsWith('headless_shell')` guard, since `headless_shell` is simply never the name being matched.
+- `PATH` is split with `node:path`'s `delimiter` everywhere it is read, including the `Xvfb` lookup.
+
+**Why it survived**: the plugin was developed against Linux hosts that have `google-chrome-stable` on PATH, which is the one deployment where all four assumptions hold at once. The general lesson is narrower than "test on Windows": **a lookup that names the platform's own spelling of a thing — a program name, a separator, a cache directory — has to be written per platform, and a failure message that names one platform's package manager will send you looking in the wrong place.**
