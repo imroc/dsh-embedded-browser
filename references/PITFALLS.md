@@ -320,3 +320,24 @@ The lesson worth carrying to any long-lived browser you start on the user's beha
 - do not "fix" this by defaulting `lazyTools` to `false`: that pays 7.3 KB of schemas on every request of every session, including the ones that never touch a browser.
 
 A real fix has to read the **persisted** session log at arm time rather than the live store (or key the reveal on something process-independent). Until then the honest documentation is "the gate is per process", which is what the tool descriptions and this entry say.
+
+## 25. Under the desktop shell the panel never connects: the page origin is the shell, not the host
+
+**Symptom**: in the DSH desktop app the Sidebar tab opens and renders — the guide, the toolbar, the `ask_human` banner with its reply box — but the canvas stays blank and the status sits on "连接断开，正在重连…" forever. The tools are unaffected: `browser_embedded_*` drives the page and `browser_embedded_screenshot` returns a real frame, so only the live channel is broken. Measured on 2026-09-30 against the desktop app; the same build connects and streams normally in a plain browser (`dsh web`).
+
+**Cause**: the client built the socket from `window.location`. The desktop app serves the GUI from its own privileged scheme, so `window.location` names the *shell* and not the host: the address came out as `ws://app/api/dsh-embedded-browser/stream`, a hostname that does not exist. The connection dies before it is ever a request the host could answer, which is why nothing in the host's log mentions it and why the reconnect loop is the only symptom.
+
+The host half is not at fault, and it is worth proving that before changing anything: opening the upgrade by hand with a valid session cookie answers `HTTP/1.1 101 Switching Protocols`, then the `hello` frame, then a real JPEG. The desktop shell even injects the authentication cookie into WebSocket upgrades itself — but only for the host's loopback origin, matched with `urls: ['ws://127.0.0.1/*']` and gated on the request presenting `Origin: dsh-app://app`; a socket addressing `app` matches neither rule, and one that reaches the handler without that origin is cancelled.
+
+**Fix**: ask the shell where the host is. The desktop boot publishes the host's origin as `globalThis.__DSH_TRANSPORT__ = { ownsHost: true, streamBaseUrl }` before any client bundle loads — it is the same value the shipped client feeds its own stream carrier — so the address is derived from it, falling back to the page origin where no such transport exists:
+
+```js
+const streamAddress = () => {
+  const base = globalThis.__DSH_TRANSPORT__?.streamBaseUrl ?? window.location.origin
+  const url = new URL(STREAM_PATH, base)
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
+  return url.href
+}
+```
+
+**Why `location.host` looked right in every check until now**: `dsh web` serves the GUI from the host's own origin, so `location.host` and `streamBaseUrl` are the same string, and the client half is verified by hand against exactly that deployment. The desktop shell is the one composition where the two diverge — so a client that reads `window.location` is correct in every environment this project checks by hand and broken in the one it does not. The lesson generalises past this socket: **a client bundle's origin is whatever the shell chose, and only the shell knows where the host is.**
