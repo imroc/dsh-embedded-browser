@@ -320,3 +320,25 @@ The lesson worth carrying to any long-lived browser you start on the user's beha
 - do not "fix" this by defaulting `lazyTools` to `false`: that pays 7.3 KB of schemas on every request of every session, including the ones that never touch a browser.
 
 A real fix has to read the **persisted** session log at arm time rather than the live store (or key the reveal on something process-independent). Until then the honest documentation is "the gate is per process", which is what the tool descriptions and this entry say.
+
+## 26. `--dsw-alias-brand-primary` is a foreground colour, so white-on-white hid both hand-over buttons
+
+**Symptom**: the hand-over banner renders its two buttons as blank white pills — no label at all, not even a faint one — measured on 2026-09-30 in the DSH desktop app's dark theme. "回复" and "我已完成" are both invisible, so the only way to answer a hand-over is to guess which pill is which. Every other control in the panel (back/forward/reload, ⟳, the Tab keys, the reply input) draws normally.
+
+**Cause**: the rule paired a host-theme background with a hard-coded white foreground:
+
+```js
+[data-dsh-embedded-browser] button.deb-primary{ … background:var(--dsw-alias-brand-primary,#3b82f6);color:#fff }
+```
+
+`--dsw-alias-brand-primary` is not a saturated accent with white text on it. Read out of `@deepseek-ai/dsh-client-ui-theme`, it resolves to the *same* value as `--dsw-alias-label-primary` in both themes — `#0f1115` light, `#f9fafb` dark. It is a foreground colour, and in the dark theme it is near-white: the button filled `#f9fafb` and painted `#fff` on top of it. The fallback never applied, because the token *is* defined.
+
+**Fix**: pair it with the surface it is meant to be read against, which is exactly the inverse in both themes:
+
+```js
+background:var(--dsw-alias-brand-primary,#3b82f6);color:var(--dsw-alias-bg-base,#fff)
+```
+
+`--dsw-alias-bg-base` is `#fff` light and `#151517` dark, so the pair stays high-contrast either way, and the two fallbacks still reproduce the original blue-on-white where no theme is mounted. Rendered side by side before and after, the pills go from empty to legible.
+
+**Why it survived review**: it only breaks in one theme. In light mode `brand-primary` is near-black and the hard-coded `#fff` is correct, so the rule looks right in the theme a stylesheet is usually eyeballed in. The general lesson is the one the other theme bugs in this file share: **a token's name says where it is used, not what it is** — and the only way to know which way round a `--dsw-alias-*` pair goes is to read its value out of the theme, in both modes, rather than to reason from the name.
